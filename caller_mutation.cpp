@@ -90,7 +90,7 @@ _declspec( naked ) void mutate( )
 	}
 }
 
-void main_thread( HMODULE dll_module )
+void main_thread( )
 {
 	const auto base = reinterpret_cast< std::uint32_t >( GetModuleHandleA( nullptr ) );
 	constexpr auto rel_addr_of_callee = 0xDEADBEEF;
@@ -109,7 +109,7 @@ bool __stdcall DllMain( HMODULE dll_module, const std::uint32_t reason_for_call,
 {
 	if( reason_for_call == DLL_PROCESS_ATTACH )
 	{
-		std::thread{ main_thread, dll_module }.detach( );
+		std::thread{ main_thread }.detach( );
 	}
 	return true;
 }
