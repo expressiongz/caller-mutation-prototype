@@ -3,33 +3,9 @@
 #include <thread>
 #include <functional>
 #include <span>
+#include <cstdint>
 
 #define _DEBUG
-
-void map_mutation_function( void* callee_function_address, std::span< std::uint8_t > overwritten_function_bytes )
-{
-	const auto alloc_func = VirtualAlloc( nullptr, overwritten_function_bytes.size( ), MEM_COMMIT, PAGE_EXECUTE_READWRITE );
-
-	if( !alloc_func )
-		throw std::runtime_error( "failed to allocate function" );
-
-#ifdef _DEBUG
-	std::printf( "allocated function address %p\n", alloc_func );
-#endif
-
-	std::memcpy( alloc_func, overwritten_function_bytes.data( ), overwritten_function_bytes.size( ) );
-
-	DWORD vp_old_protection{ 0u };
-
-	VirtualProtect( callee_function_address, 5,  PAGE_EXECUTE_READWRITE, &vp_old_protection );
-
-	const auto relative_address = reinterpret_cast< std::uint32_t >( alloc_func ) - reinterpret_cast< std::uint32_t >( callee_function_address ) - 5;
-
-	*static_cast< std::uint8_t* >( callee_function_address ) = 0xE9;
-	*reinterpret_cast< std::uint32_t* >( reinterpret_cast< std::uint32_t >( callee_function_address ) + 1 ) = relative_address;
-
-	VirtualProtect( callee_function_address, 5,  vp_old_protection, &vp_old_protection );
-}
 
 std::vector< std::uint8_t > ret_function_instrs( void* function_address )
 {
@@ -39,10 +15,55 @@ std::vector< std::uint8_t > ret_function_instrs( void* function_address )
 	{
 		function_bytes.push_back( *byte );
 		++byte;
-
 	} while ( *reinterpret_cast< std::uint32_t* >( byte ) != 0xCCCCCCCC );
 	return function_bytes;
 }
+
+
+void* map_mutation_function(  void* callee_function_address, std::span< std::uint8_t > overwritten_function_bytes )
+{
+	static const auto base_module_code_base = reinterpret_cast< std::uint32_t >( GetModuleHandleA( nullptr ) ) + 0x1000;
+	const auto callee_function_instrs = ret_function_instrs( callee_function_address );
+
+	const auto mutation_func = VirtualAlloc( nullptr, overwritten_function_bytes.size( ), MEM_COMMIT, PAGE_EXECUTE_READWRITE );
+	const auto new_callee = VirtualAlloc( nullptr, callee_function_instrs.size( ), MEM_COMMIT, PAGE_EXECUTE_READWRITE );
+	
+	if( !mutation_func )
+		throw std::runtime_error( "failed to allocate function" );
+	if( !new_callee )
+		throw std::runtime_error( "failed to allocate new callee" );
+
+#ifdef _DEBUG
+	std::printf( "allocated mutation function:  %p\n", mutation_func );
+	std::printf( "allocated new callee: %p\n", new_callee );
+#endif
+	
+	for( auto it = callee_function_instrs.begin( ); it < callee_function_instrs.end( ); ++it )
+	{
+		if( *it == 0xE8 )
+		{
+			const auto rel_call = reinterpret_cast< std::uint32_t* >( it._Ptr + 1 );
+			*rel_call = *rel_call - reinterpret_cast< std::uint32_t >( new_callee ) + base_module_code_base;
+		}
+	}
+
+	std::memcpy( mutation_func, overwritten_function_bytes.data( ), overwritten_function_bytes.size( ) );
+	std::memcpy( new_callee, callee_function_instrs.data( ), callee_function_instrs.size( ) );
+
+	DWORD vp_old_protection{ 0u };
+
+	VirtualProtect( callee_function_address, 5,  PAGE_EXECUTE_READWRITE, &vp_old_protection );
+
+	const auto relative_address = reinterpret_cast< std::uint32_t >( mutation_func ) - reinterpret_cast< std::uint32_t >( callee_function_address ) - 5;
+
+	*static_cast< std::uint8_t* >( callee_function_address ) = 0xE9;
+	*reinterpret_cast< std::uint32_t* >( reinterpret_cast< std::uint32_t >( callee_function_address ) + 1 ) = relative_address;
+
+	VirtualProtect( callee_function_address, 5,  vp_old_protection, &vp_old_protection );
+
+	return new_callee;
+}
+
 
 
 DWORD vp_old_protection{ 0u };
@@ -72,10 +93,14 @@ _declspec( naked ) void mutate( )
 void main_thread( HMODULE dll_module )
 {
 	const auto base = reinterpret_cast< std::uint32_t >( GetModuleHandleA( nullptr ) );
-	const auto callee_address = base + 0xDEADBEEF;
+	constexpr auto rel_addr_of_callee = 0xDEADBEEF;
+
+	const auto callee_address = base + rel_addr_of_callee;
 
 	auto mutate_function_bytes = ret_function_instrs( &mutate );
-	map_mutation_function( reinterpret_cast< void* >( callee_address ), mutate_function_bytes );
+	const auto new_callee = reinterpret_cast< void( * )( ) >( map_mutation_function( reinterpret_cast< void* >( callee_address ), mutate_function_bytes ) );
+
+	new_callee( );
 }
 
 
