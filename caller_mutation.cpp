@@ -40,7 +40,7 @@ void* map_mutation_function(  void* callee_function_address, std::span< std::uin
 	
 	for( auto it = callee_function_instrs.begin( ); it < callee_function_instrs.end( ); ++it )
 	{
-		if( *it == 0xE8 )
+		if( *it == 0xE8 || *it == 0xE9 )
 		{
 			const auto rel_call = reinterpret_cast< std::uint32_t* >( it._Ptr + 1 );
 			*rel_call = *rel_call - reinterpret_cast< std::uint32_t >( new_callee ) + base_module_code_base;
