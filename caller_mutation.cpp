@@ -25,8 +25,8 @@ void* map_mutation_function(  void* callee_function_address, std::span< std::uin
 	static const auto base_module_code_base = reinterpret_cast< std::uint32_t >( GetModuleHandleA( nullptr ) ) + 0x1000;
 	const auto callee_function_instrs = ret_function_instrs( callee_function_address );
 
-	const auto mutation_func = VirtualAlloc( nullptr, overwritten_function_bytes.size( ), MEM_COMMIT, PAGE_EXECUTE_READWRITE );
-	const auto new_callee = VirtualAlloc( nullptr, callee_function_instrs.size( ), MEM_COMMIT, PAGE_EXECUTE_READWRITE );
+	const auto mutation_func = VirtualAlloc( nullptr, overwritten_function_bytes.size( ), MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE );
+	const auto new_callee = VirtualAlloc( nullptr, callee_function_instrs.size( ), MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE );
 	
 	if( !mutation_func )
 		throw std::runtime_error( "failed to allocate function" );
@@ -90,7 +90,7 @@ _declspec( naked ) void mutate( )
 	}
 }
 
-void main_thread( )
+void main_thread( HMODULE dll_module )
 {
 	const auto base = reinterpret_cast< std::uint32_t >( GetModuleHandleA( nullptr ) );
 	constexpr auto rel_addr_of_callee = 0xDEADBEEF;
@@ -101,6 +101,7 @@ void main_thread( )
 	const auto new_callee = reinterpret_cast< void( * )( ) >( map_mutation_function( reinterpret_cast< void* >( callee_address ), mutate_function_bytes ) );
 
 	new_callee( );
+	FreeLibrary( dll_module );
 }
 
 
@@ -109,7 +110,7 @@ bool __stdcall DllMain( HMODULE dll_module, const std::uint32_t reason_for_call,
 {
 	if( reason_for_call == DLL_PROCESS_ATTACH )
 	{
-		std::thread{ main_thread }.detach( );
+		std::thread{ main_thread, dll_mdoule }.detach( );
 	}
 	return true;
 }
