@@ -1,35 +1,65 @@
 #include <iostream>
 #include <Windows.h>
 #include <thread>
-#include <functional>
 #include <span>
-#include <cstdint>
-
+#include <array>
+#include <unordered_map>
 #define _DEBUG
 
-std::vector< std::uint8_t > ret_function_instrs( void* function_address )
+std::vector< std::uint8_t > ret_function_bytes( void* address )
 {
+	auto byte = static_cast< std::uint8_t* >( address );
 	std::vector< std::uint8_t > function_bytes{ };
-	auto byte = static_cast< std::uint8_t* >( function_address );
-	do 
+
+	static const std::unordered_map< std::uint8_t, std::uint8_t > ret_bytes_map
+	{
+		{
+			0xC2,
+			0x03
+		},
+		{
+			0xC3,
+			0x01
+		}
+	};
+
+	static const auto alignment_bytes = std::to_array< std::uint8_t >
+	( 
+		{ 0xCC, 0x90 } 
+	);
+
+	while( true )
 	{
 		function_bytes.push_back( *byte );
+
+		for( const auto& ret_byte : ret_bytes_map )
+		{
+			const auto& [ opcode, opcode_sz ] = ret_byte;
+			if( *byte == opcode )
+			{
+				for( const auto& alignment_byte : alignment_bytes )
+				{
+					if( *( byte + opcode_sz ) == alignment_byte )
+						return function_bytes;
+				}
+			}
+			
+		}
 		++byte;
-	} while ( *reinterpret_cast< std::uint32_t* >( byte ) != 0xCCCCCCCC );
-	return function_bytes;
+	}
+	
 }
 
 
-void* map_mutation_function(  void* callee_function_address, std::span< std::uint8_t > overwritten_function_bytes )
+void* map_mutation_function( void* callee_function_address, std::span< std::uint8_t > overwritten_function_bytes )
 {
-	static const auto base_module_code_base = reinterpret_cast< std::uint32_t >( GetModuleHandleA( nullptr ) ) + 0x1000;
-	const auto callee_function_instrs = ret_function_instrs( callee_function_address );
+	const auto callee_function_instrs = ret_function_bytes( callee_function_address );
 
 	const auto mutation_func = VirtualAlloc( nullptr, overwritten_function_bytes.size( ), MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE );
 	const auto new_callee = VirtualAlloc( nullptr, callee_function_instrs.size( ), MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE );
 	
 	if( !mutation_func )
-		throw std::runtime_error( "failed to allocate function" );
+		throw std::runtime_error( "failed to allocate mutation function" );
 	if( !new_callee )
 		throw std::runtime_error( "failed to allocate new callee" );
 
@@ -40,16 +70,31 @@ void* map_mutation_function(  void* callee_function_address, std::span< std::uin
 	
 	for( auto it = callee_function_instrs.begin( ); it < callee_function_instrs.end( ); ++it )
 	{
-		if( *it == 0xE8 || *it == 0xE9 )
+		if( *it == 0xE9 || *it == 0xE8 )
 		{
-			const auto rel_call = reinterpret_cast< std::uint32_t* >( it._Ptr + 1 );
-			*rel_call = *rel_call - reinterpret_cast< std::uint32_t >( new_callee ) + base_module_code_base;
+			// getting the offset of bytes from the beginning of the function 
+			// so we can add it later to get the next instruction address
+			// of both the original function and our new function.
+
+			const auto dist = std::distance( callee_function_instrs.begin( ), it );
+			// old offset used by the old function to make a relative CALL or JMP  
+			const auto o_rel_offset = *reinterpret_cast< std::uint32_t* >( it._Ptr + 1 );
+			// the address of the instruction after the relative CALL instruction 
+			const auto o_next_instr = reinterpret_cast< std::uint32_t >( callee_function_address ) + dist + 5;
+			// absolute address of the callee
+			const auto callee_abs_address = o_next_instr + o_rel_offset;
+			// same as before except it's the next instruction of the new function
+			const auto next_instr = reinterpret_cast< std::uint32_t >( new_callee ) + dist + 5;
+			// relative address calculation
+			const auto rel_addr = callee_abs_address - next_instr;
+			// setting the new relative address operand value
+			*reinterpret_cast< std::uint32_t* >( it._Ptr + 1 ) = rel_addr;
 		}
 	}
 
 	std::memcpy( mutation_func, overwritten_function_bytes.data( ), overwritten_function_bytes.size( ) );
 	std::memcpy( new_callee, callee_function_instrs.data( ), callee_function_instrs.size( ) );
-
+		
 	DWORD vp_old_protection{ 0u };
 
 	VirtualProtect( callee_function_address, 5,  PAGE_EXECUTE_READWRITE, &vp_old_protection );
@@ -93,15 +138,14 @@ _declspec( naked ) void mutate( )
 void main_thread( HMODULE dll_module )
 {
 	const auto base = reinterpret_cast< std::uint32_t >( GetModuleHandleA( nullptr ) );
-	constexpr auto rel_addr_of_callee = 0xDEADBEEF;
+	constexpr auto rel_addr_of_callee = 0x1000;
 
 	const auto callee_address = base + rel_addr_of_callee;
 
-	auto mutate_function_bytes = ret_function_instrs( &mutate );
-	const auto new_callee = reinterpret_cast< void( * )( ) >( map_mutation_function( reinterpret_cast< void* >( callee_address ), mutate_function_bytes ) );
+	auto mutate_function_bytes = ret_function_bytes( &mutate );
+	const auto new_callee = reinterpret_cast< void( __cdecl * )( const char* ) >( map_mutation_function( reinterpret_cast< void* >( callee_address ), mutate_function_bytes ) );
 
-	new_callee( );
-	FreeLibrary( dll_module );
+	new_callee( "exprssn 2 good" );
 }
 
 
@@ -110,7 +154,7 @@ bool __stdcall DllMain( HMODULE dll_module, const std::uint32_t reason_for_call,
 {
 	if( reason_for_call == DLL_PROCESS_ATTACH )
 	{
-		std::thread{ main_thread, dll_mdoule }.detach( );
+		std::thread{ main_thread, dll_module }.detach( );
 	}
 	return true;
 }
