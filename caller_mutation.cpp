@@ -131,11 +131,16 @@ void main_thread( HMODULE dll_module )
 	constexpr auto rel_addr_of_callee = 0x1000;
 
 	const auto callee_address = base + rel_addr_of_callee;
-
+	
 	auto mutate_function_bytes = ret_function_bytes( &mutate );
-	const auto new_callee = reinterpret_cast< void( __cdecl * )( const char* ) >( map_mutation_function( reinterpret_cast< void* >( callee_address ), mutate_function_bytes ) );
-
-	new_callee( "exprssn 2 good" );
+	void* new_callee{ nullptr };
+	try {
+		new_callee = map_mutation_function( reinterpret_cast< void* >( callee_address ), mutate_function_bytes );
+	} catch( const std::runtime_error& e ) {
+		std::cout << e.what();
+	}
+	reinterpret_cast< void( __cdecl* )( const char* ) >( new_callee )( "test" );
+	FreeLibrary( dll_module );
 }
 
 
